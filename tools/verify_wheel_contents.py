@@ -20,7 +20,12 @@ import zipfile
 
 REQUIRED = [
     "phocinae_formulate/fixtures/safety-53.gold.jsonl",
-    "phocinae_formulate/fixtures/replay-0.1.3.expect.json",
+    # The fixture is named for the DEFECT it replays (0.1.2's inverted polarity),
+    # not for the version doing the replaying. A blanket version bump must not
+    # rename it: the file documents history, and renaming it here while the
+    # fixtures, the CI step and the changelog all still say 0.1.2 is how this very
+    # check came to assert a file that does not exist.
+    "phocinae_formulate/fixtures/replay-0.1.2.expect.json",
     "phocinae_formulate/__init__.py",
     "phocinae_formulate/__main__.py",
     "phocinae_formulate/calibration.py",
