@@ -16,6 +16,7 @@ import argparse
 import io
 import json
 import os
+import subprocess
 import sys
 
 from . import __version__

@@ -45,7 +45,7 @@ This package measures that, reproducibly, and says so in the exit code.
 ## Install
 
 ```sh
-pip install phocinae-formulate==0.1.1
+pip install phocinae-formulate==0.1.2
 ```
 
 Python 3.9 or newer. No dependencies. **No network access**: the package imports

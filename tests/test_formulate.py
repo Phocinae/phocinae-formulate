@@ -119,6 +119,50 @@ def cli(args, cwd=REPO):
                           encoding="utf-8")
 
 
+class _health_server(object):
+    """A throwaway /health endpoint on a loopback port.
+
+    Exists so the scan probe can be tested on its *positive* path as well as its
+    negative one. A probe that is only ever observed failing proves nothing about
+    whether it can succeed.
+    """
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.server = None
+        self.thread = None
+
+    def __enter__(self):
+        import http.server
+        import threading
+
+        payload = self.payload
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                body = json.dumps(payload).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):  # keep the test output clean
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        host, port = self.server.server_address
+        return "http://%s:%d" % (host, port)
+
+    def __exit__(self, *exc):
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+        return False
+
+
 # ---------------------------------------------------------------------------
 # A. exactness of the anchors
 # ---------------------------------------------------------------------------
@@ -382,6 +426,37 @@ def test_empty_and_data_errors():
     ok("D12 and says why on stderr", "PHOCINAE_SKIP" in result.stderr, result.stderr[-300:])
     ok("D13 and names the endpoint it tried",
        "127.0.0.1:1" in result.stderr, result.stderr[-300:])
+    # D13b: the skip must be for the RIGHT reason. An earlier version exited 6
+    # because the probe itself raised NameError, which is the same "green for the
+    # wrong reason" failure the exit code was supposed to prevent.
+    ok("D13b the skip reason is a connection failure, not a defect in the probe",
+       "NameError" not in result.stderr and "Traceback" not in result.stderr,
+       result.stderr[-300:])
+    ok("D13c the reason names a real connection error",
+       any(token in result.stderr for token in
+           ("ConnectionRefused", "URLError", "ConnectionError", "timeout", "Timeout",
+            "refused")),
+       result.stderr[-300:])
+
+    # D13d: the positive path. A probe that only ever fails proves nothing, so
+    # stand up a local health endpoint and require the scan to proceed past the
+    # probe (it then fails later for a different, expected reason).
+    with _health_server({"status": "ok", "model_loaded": True}) as endpoint:
+        result = cli(["analyze", "--gold", os.path.join(FIXTURES, "safety-53.gold.jsonl"),
+                      "--scan", "--endpoint", endpoint + "/v1/systemone",
+                      "--timeout-ms", "2000"])
+        ok("D13d a reachable service is not skipped",
+           result.returncode != EXIT_SKIP, "exit=%s stderr=%s" % (result.returncode, result.stderr[-200:]))
+        ok("D13e and no skip reason is printed", "PHOCINAE_SKIP" not in result.stderr,
+           result.stderr[-200:])
+
+    with _health_server({"status": "ok", "model_loaded": False}) as endpoint:
+        result = cli(["analyze", "--gold", os.path.join(FIXTURES, "safety-53.gold.jsonl"),
+                      "--scan", "--endpoint", endpoint + "/v1/systemone",
+                      "--timeout-ms", "2000"])
+        eq("D13f a service that answers without loaded weights is still a skip",
+           result.returncode, EXIT_SKIP)
+        ok("D13g and the reason says so", "model_loaded" in result.stderr, result.stderr[-250:])
 
     # D14: a fixture name that does not exist.
     result = cli(["replay", "--fixture", "no-such-fixture",

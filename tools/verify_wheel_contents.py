@@ -40,7 +40,7 @@ REQUIRED = [
 FORBIDDEN_SUBSTRINGS = ("__pycache__", "/tests/", "\\tests\\")
 FORBIDDEN_SUFFIXES = (".pyc", ".pyo")
 
-EXPECTED_VERSION = "0.1.1"
+EXPECTED_VERSION = "0.1.2"
 
 
 def wheels_in(target):
