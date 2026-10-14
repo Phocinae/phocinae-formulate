@@ -27,6 +27,40 @@ import os
 import sys
 
 
+def _read_report(path, stream):
+    """Read the replay report however the shell happened to write it.
+
+    This reads bytes and decodes, rather than opening in text mode, because the
+    producer of this file is a *shell redirection* and shells disagree:
+
+    * `bash` writes UTF-8, no BOM;
+    * PowerShell's `>` writes UTF-16LE with a BOM;
+    * a BOM in front of otherwise valid UTF-8 JSON makes `json.load` raise
+      "Unexpected UTF-8 BOM".
+
+    A check that only understands one of those reports the author's shell instead
+    of the replay's state. Diagnosing exactly that cost a CI cycle here, so the
+    bytes are inspected instead: a BOM decides the encoding, otherwise UTF-8 is
+    tried and UTF-16 attempted only if that fails.
+    """
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    if raw == b"":
+        raise ValueError("the file is empty, so the replay wrote nothing to stdout "
+                         "(a consumer reading a pipe sees this when the writer "
+                         "does not flush)")
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        text = raw.decode("utf-16")
+    elif raw[:3] == b"\xef\xbb\xbf":
+        text = raw[3:].decode("utf-8")
+    else:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("utf-16")
+    return json.loads(text.lstrip("\ufeff \t\r\n"))
+
+
 def main(argv):
     stream = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     if len(argv) != 2:
@@ -37,17 +71,15 @@ def main(argv):
         stream.write("FAIL the replay produced no JSON at %s\n" % path)
         return 1
 
-    # `utf-8-sig`, not `utf-8`. A byte-order mark in front of otherwise valid JSON
-    # makes `json.load` raise "Unexpected UTF-8 BOM", and this check would then
-    # report a red step for a file that is fine. Windows shells write a BOM by
-    # default; the CLI does not. Accepting both is the difference between a check
-    # that reports the replay's state and one that reports the author's shell.
-    with open(path, "r", encoding="utf-8-sig") as handle:
-        try:
-            report = json.load(handle)
-        except ValueError as exc:
-            stream.write("FAIL %s is not valid JSON: %s\n" % (path, exc))
-            return 1
+    try:
+        report = _read_report(path, stream)
+    except ValueError as exc:
+        stream.write("FAIL %s could not be read as JSON: %s\n" % (path, exc))
+        return 1
+    if not isinstance(report, dict):
+        stream.write("FAIL %s holds a %s, not a report object\n"
+                     % (path, type(report).__name__))
+        return 1
 
     failures = []
 

@@ -66,6 +66,20 @@ def _emit(text):
     except (AttributeError, ValueError):
         pass
     stream.write(text)
+    # Flush explicitly rather than relying on interpreter shutdown.
+    #
+    # When stdout is a pipe -- which is what CI does, and what `--json > file`
+    # does -- CPython block-buffers it instead of line-buffering. The buffer is
+    # normally flushed on exit, but `main()` returns an exit code and the process
+    # ends through `sys.exit()`, and a `TextIOWrapper` whose underlying buffer is
+    # not explicitly closed can lose it. The symptom is silent and specific: a
+    # consumer sees an *empty* file where a report should be, and reports "not
+    # valid JSON: Expecting value: line 1 column 1" -- which points at the reader
+    # rather than at the missing output.
+    try:
+        stream.flush()
+    except (AttributeError, ValueError):
+        pass
 
 
 def _parse_tau_grid(spec):
