@@ -38,11 +38,24 @@ jobs:
       # so a check that reports a problem and a check that is broken produce the
       # same red step with no way to tell them apart. `tools/check_replay_json.py`
       # names what it looked for.
+      # `PYTHONPATH: src` is required, and its absence was a silent CI defect.
+      #
+      # This project uses a src layout and is not installed in these jobs, so
+      # without it `python -m phocinae_formulate` fails with "No module named
+      # phocinae_formulate" -- and that exits **1**, which the `code != 1` guard
+      # below reads as "a finding was reported". The step then died on the next
+      # line with an empty replay.json, naming neither the missing module nor the
+      # missing path. The unit tests never showed this because the test script
+      # sets PYTHONPATH for itself.
       - name: Replay the 0.1.2 regression anchor
         shell: bash
         env:
           PYTHONUTF8: "1"
+          PYTHONPATH: src
         run: |
+          # Fail loudly if the package is not importable, rather than letting a
+          # missing module masquerade as "the defect was reproduced".
+          python -c "import phocinae_formulate; print('importable:', phocinae_formulate.__version__)"
           set +e
           python -m phocinae_formulate replay --fixture safety-53 \
             --expect fixtures/replay-0.1.2.expect.json --fixture-path fixtures --json > replay.json
@@ -58,6 +71,7 @@ jobs:
       - name: Doctor on the shipped gold set
         env:
           PYTHONUTF8: "1"
+          PYTHONPATH: src
         run: python -m phocinae_formulate doctor --gold fixtures/safety-53.gold.jsonl
 
       - name: Build a wheel and inspect it

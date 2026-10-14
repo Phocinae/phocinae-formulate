@@ -24,14 +24,22 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python tests/test_formulate.py
 
-      # `run:` blocks execute under `set -e`, and `grep -q` exits 1 when it finds
-      # nothing — so an assertion made with grep cannot distinguish "the replay is
-      # wrong" from "my pattern is wrong". The JSON is checked in Python instead.
+      # `PYTHONPATH: src` is required: this project uses a src layout and is not
+      # installed in this job. Without it `python -m phocinae_formulate` fails
+      # with "No module named phocinae_formulate", and that exits **1** -- the
+      # same code as "a finding was reported", so the guard below accepted an
+      # import failure as a successful reproduction and the step died later on an
+      # empty replay.json.
+      #
+      # The import is asserted first so a missing module can never again be
+      # mistaken for "the defect was reproduced".
       - name: Replay the 0.1.2 regression anchor
         shell: bash
         env:
           PYTHONUTF8: "1"
+          PYTHONPATH: src
         run: |
+          python -c "import phocinae_formulate; print('importable:', phocinae_formulate.__version__)"
           set +e
           python -m phocinae_formulate replay --fixture safety-53 \
             --expect fixtures/replay-0.1.2.expect.json --fixture-path fixtures --json > replay.json
