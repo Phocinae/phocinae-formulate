@@ -20,7 +20,7 @@ import zipfile
 
 REQUIRED = [
     "phocinae_formulate/fixtures/safety-53.gold.jsonl",
-    "phocinae_formulate/fixtures/replay-0.1.2.expect.json",
+    "phocinae_formulate/fixtures/replay-0.1.3.expect.json",
     "phocinae_formulate/__init__.py",
     "phocinae_formulate/__main__.py",
     "phocinae_formulate/calibration.py",
@@ -40,7 +40,7 @@ REQUIRED = [
 FORBIDDEN_SUBSTRINGS = ("__pycache__", "/tests/", "\\tests\\")
 FORBIDDEN_SUFFIXES = (".pyc", ".pyo")
 
-EXPECTED_VERSION = "0.1.2"
+EXPECTED_VERSION = "0.1.3"
 
 
 def wheels_in(target):

@@ -2,6 +2,51 @@
 
 All notable changes to `phocinae-formulate` are documented here.
 
+## 0.1.3 — 2026-10-14
+
+### Fixed — the test suite failed on every CI runner and exited 0 anyway
+
+`test_anchor_exactness` cross-checks the fixtures against the raw Phocinae
+recording, which lives in a sibling checkout (`../repos/dsh-phocinae/...`) that is
+**not part of this repository**. When it was absent the test called
+`ok(..., False)`, and at the time `ok` only *recorded* failures without raising.
+
+The result: on all six CI matrix cells the suite printed `FAIL=2` and then exited
+`0`. CI was green for three releases while reporting a failure, and the anchor's
+most load-bearing assertions — the ones that establish the recording's polarity —
+were only ever verified on one machine.
+
+That is the same defect class as the suite being invisible under `pytest`, and it
+had the same cause: a failure path that did not fail. `ok` raising (0.1.2) is what
+finally surfaced it, in the form of CI turning red — correctly, but for a reason
+that is not a defect in this project.
+
+Neither forcing a failure nor quietly passing is the right answer. A missing
+sibling checkout is not a project defect, and it is not evidence either. So the
+suite gained a real **SKIP** channel:
+
+* the eight cross-check assertions are reported as `SKIP`, with the path they
+  looked for and how to supply it;
+* skips are counted and printed in their own bucket, and the summary says
+  `SKIP is not PASS: a skipped check verified nothing`;
+* `PHOCINAE_GATE_BENCH` can point at a recording elsewhere.
+
+CI now reports `PASS=124 FAIL=0 SKIP=8` where it previously reported
+`PASS=124 FAIL=2` **and exited 0**. Locally, with the recording present, it reports
+`PASS=132 FAIL=0 SKIP=0` — so the eight assertions still run where they can.
+
+### Added — a release workflow
+
+`.github/workflows/release.yml` did not exist for this project, so its PyPI
+trusted publisher had nothing to bind to and every version was uploaded by hand
+with `twine`.
+
+The workflow is named `release.yml` deliberately: PyPI binds a trusted publisher
+to owner + repository + **workflow filename** + environment, so renaming this file
+silently breaks publishing and the error only appears after a failed release.
+`skip-existing: true` makes the publish job idempotent on a version already on
+PyPI, so re-running the workflow is a safe way to test the publisher binding
+without spending a version number.
 ## 0.1.2
 
 **`--scan` skipped for the wrong reason.** The health probe was moved

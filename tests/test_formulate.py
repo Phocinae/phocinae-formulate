@@ -50,7 +50,7 @@ from phocinae_formulate.calibration import ece  # noqa: E402
 from phocinae_formulate.errors import EXIT_SKIP  # noqa: E402
 from phocinae_formulate.formulations import FORMULATIONS, get_formulation  # noqa: E402
 
-CHECKS = {"passed": 0, "failed": []}
+CHECKS = {"passed": 0, "failed": [], "skipped": []}
 
 
 class CheckFailed(AssertionError):
@@ -69,6 +69,27 @@ def ok(label, condition, detail=""):
         return True
     CHECKS["failed"].append((label, detail))
     raise CheckFailed("%s%s" % (label, (": " + str(detail)) if detail else ""))
+
+
+def skip(label, why):
+    """Record that an assertion verified nothing, and why.
+
+    A skip is not a pass. It is counted in its own bucket and printed, so the
+    totals show the difference between "this was checked" and "this could not be
+    checked here".
+
+    The distinction matters because of how this suite got here. Before 0.1.3 the
+    cross-check against the raw recording called ``ok(..., False)`` when the
+    recording was absent, and ``ok`` only *recorded* failures without raising.
+    The result was a suite that reported FAIL on every CI runner while exiting 0,
+    so CI showed green for three releases and the anchor's most load-bearing
+    assertions were never verified anywhere except one developer's disk.
+
+    Neither forcing a failure nor quietly passing is right. A missing sibling
+    checkout is not a defect in this project, and it is not evidence either.
+    """
+    CHECKS["skipped"].append((label, why))
+    return None
 
 
 def eq(label, actual, expected):
@@ -207,7 +228,15 @@ def test_anchor_exactness():
         close("A6 %s false-block exact" % name, entry["model_false_block"], false_block, 0.0)
 
     # Re-derive the anchor from the raw recording, independently of the fixture.
-    gate = os.path.join(
+    #
+    # This cross-check needs the sibling `dsh-phocinae` checkout, which is not
+    # part of this repository. Where it is absent the assertions below are
+    # SKIPPED, not failed and not passed: "I could not check" is a third answer,
+    # and reporting it as either of the other two is how the previous version
+    # ended up green in CI while reporting FAIL on every runner.
+    #
+    # Set PHOCINAE_GATE_BENCH to point at a recording elsewhere.
+    gate = os.environ.get("PHOCINAE_GATE_BENCH") or os.path.join(
         os.path.dirname(REPO),
         "..", "repos", "dsh-phocinae", "bench", "results", "gate-bench.json")
     if os.path.isfile(gate):
@@ -241,8 +270,19 @@ def test_anchor_exactness():
         ok("A14 the two polarities are genuinely different",
            abs(float(fwd_tp) / (fwd_tp + fwd_fn) - float(rev_tp) / (rev_tp + rev_fn)) > 0.5)
     else:
-        ok("A7 raw recording available for cross-check", False,
-           "expected the recording at %s" % gate)
+        for label in (
+            "A7 the recording itself has 31 destructive commands",
+            "A8 the recording flags none of them",
+            "A9 the recording misses all of them",
+            "A10 recall recomputed from the raw recording is 0.0",
+            "A11 recorded flagged == answer for every case",
+            "A12 forward polarity (p_true >= cut) reproduces the 0.5 fixture",
+            "A13 reversed polarity reproduces the negated fixture",
+            "A14 the two polarities are genuinely different",
+        ):
+            skip(label,
+                 "the raw recording is not available at %s; set PHOCINAE_GATE_BENCH to "
+                 "point at it, or check out Phocinae/dsh-phocinae beside this repository" % gate)
 
 
 # ---------------------------------------------------------------------------
@@ -735,10 +775,16 @@ def main():
         if detail:
             for line in str(detail).rstrip().splitlines():
                 stream.write("       %s\n" % line)
-    total = CHECKS["passed"] + len(CHECKS["failed"])
+    for label, why in CHECKS["skipped"]:
+        stream.write("  SKIP %s\n" % label)
+        for line in str(why).rstrip().splitlines():
+            stream.write("       %s\n" % line)
     stream.write("-" * 64 + "\n")
-    stream.write("TOTAL PASS=%d FAIL=%d  groups=%d/%d\n"
-                 % (CHECKS["passed"], len(CHECKS["failed"]), len(tests) - crashed, len(tests)))
+    stream.write("TOTAL PASS=%d FAIL=%d SKIP=%d  groups=%d/%d\n"
+                 % (CHECKS["passed"], len(CHECKS["failed"]), len(CHECKS["skipped"]),
+                    len(tests) - crashed, len(tests)))
+    if CHECKS["skipped"]:
+        stream.write("SKIP is not PASS: a skipped check verified nothing.\n")
     if CHECKS["passed"] == 0:
         stream.write("FAIL: nothing was verified\n")
         return 1

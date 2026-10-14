@@ -42,7 +42,7 @@ from .taucan import tau_sweep
 from .verdict import Decision, decide_formulation, overall, rank
 from .report import analyse, build_report, render_text
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 __all__ = [
     "__version__",
