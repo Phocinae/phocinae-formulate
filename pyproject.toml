@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phocinae-formulate"
+version = "0.1.0"
+description = "Measure which way of asking a decision model actually works: run four formulations over one labelled set and report recall, calibration and a usable escalation threshold."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Phocinae" }]
+keywords = [
+  "decision-model", "benchmark", "calibration", "escalation", "evaluation",
+  "phocinae", "local-first", "no-network",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Phocinae/phocinae-formulate"
+Repository = "https://github.com/Phocinae/phocinae-formulate"
+Issues = "https://github.com/Phocinae/phocinae-formulate/issues"
+
+[project.scripts]
+phocinae-formulate = "phocinae_formulate.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["phocinae_formulate"]
+
+[tool.setuptools.package-data]
+phocinae_formulate = ["py.typed"]

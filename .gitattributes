@@ -1,0 +1,6 @@
+﻿# Records are LF. These fixtures are compared byte-for-byte in tests, so a
+# checkout that rewrites line endings would break them for a reason that has
+# nothing to do with their content.
+* text=auto eol=lf
+*.whl binary
+*.tar.gz binary

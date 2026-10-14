@@ -1,0 +1,76 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }} · py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Test suite (no network, no service, no third-party packages)
+        env:
+          PYTHONUTF8: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python tests/test_formulate.py
+
+      # The point of the project: a replay of the 0.1.2 defect must report that
+      # formulation as unusable and must say so in the exit code. Exit 1 is a
+      # *finding*, not a failure, so {0,1} is the accepted set.
+      - name: Replay the 0.1.2 regression anchor
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          set +e
+          python -m phocinae_formulate replay --fixture safety-53 \
+            --expect fixtures/replay-0.1.2.expect.json --fixture-path fixtures --json > replay.json
+          code=$?
+          set -e
+          echo "replay exit code: $code (1 = a finding was reported)"
+          if [ "$code" != "1" ]; then
+            echo "expected exit 1 (finding), got $code"
+            exit 1
+          fi
+          grep -q '"passed":true' replay.json
+          grep -q 'DO NOT USE' replay.json
+
+      - name: Doctor on the shipped gold set
+        env:
+          PYTHONUTF8: "1"
+        run: python -m phocinae_formulate doctor --gold fixtures/safety-53.gold.jsonl
+
+      - name: Build a wheel and inspect it
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          python -m pip install build
+          python -m build --wheel --outdir dist-upload
+          python tools/verify_wheel_contents.py dist-upload
+
+      - name: The working tree must be clean after the suite
+        shell: bash
+        run: |
+          if [ -d .git ]; then
+            dirty=$(git status --porcelain | wc -l)
+            echo "dirty entries: $dirty"
+            git status --porcelain
+            test "$dirty" -eq 0
+          else
+            echo "not a git checkout; skipping"
+          fi
