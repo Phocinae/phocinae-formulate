@@ -32,6 +32,12 @@ jobs:
       # The point of the project: a replay of the 0.1.2 defect must report that
       # formulation as unusable and must say so in the exit code. Exit 1 is a
       # *finding*, not a failure, so {0,1} is the accepted set.
+      #
+      # The JSON assertions run in Python rather than through `grep -q`. `grep -q`
+      # exits 1 when it finds nothing, and a `run:` block executes under `set -e`,
+      # so a check that reports a problem and a check that is broken produce the
+      # same red step with no way to tell them apart. `tools/check_replay_json.py`
+      # names what it looked for.
       - name: Replay the 0.1.2 regression anchor
         shell: bash
         env:
@@ -47,8 +53,7 @@ jobs:
             echo "expected exit 1 (finding), got $code"
             exit 1
           fi
-          grep -q '"passed":true' replay.json
-          grep -q 'DO NOT USE' replay.json
+          python tools/check_replay_json.py replay.json
 
       - name: Doctor on the shipped gold set
         env:

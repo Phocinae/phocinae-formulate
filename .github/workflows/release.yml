@@ -24,9 +24,9 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python tests/test_formulate.py
 
-      # The two tests that compare two loggers must not be satisfied by the same
-      # interpreter twice; running the suite a second time exercises the replay
-      # fixtures from a cold start.
+      # `run:` blocks execute under `set -e`, and `grep -q` exits 1 when it finds
+      # nothing — so an assertion made with grep cannot distinguish "the replay is
+      # wrong" from "my pattern is wrong". The JSON is checked in Python instead.
       - name: Replay the 0.1.2 regression anchor
         shell: bash
         env:
@@ -42,8 +42,7 @@ jobs:
             echo "expected exit 1 (finding), got $code"
             exit 1
           fi
-          grep -q '"passed":true' replay.json
-          grep -q 'DO NOT USE' replay.json
+          python tools/check_replay_json.py replay.json
 
   build:
     name: build and inspect the artefact
