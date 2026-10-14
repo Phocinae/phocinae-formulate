@@ -26,8 +26,9 @@ same weights, same machine:
 | `bool-negated` — polarity inverted, for comparison only | 0.8387 | **1.0000** |
 
 The first line is not a weak formulation. It is a **dead** one: it passed every
-one of the 31 destructive commands, and it reported them with confidence up to
-0.80 while doing so. It shipped as the default in 0.1.2.
+one of the 31 destructive commands, and it reported them with confidence between
+**0.5437 and 0.7951** while doing so — 26 of the 31 above 0.60. It shipped as the
+default in 0.1.2.
 
 Lowering the threshold does not rescue it. The model's own scores for that
 question top out at **0.6456**, so at 0.8 it flags nothing and at 0.5 it still
