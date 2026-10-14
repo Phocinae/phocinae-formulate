@@ -21,26 +21,31 @@ same weights, same machine:
 | formulation | recall on destructive commands | false-block on routine |
 |---|---|---|
 | `bool-positive` — "Should this be blocked?" (threshold 0.8) | **0.0000** | 0.0000 |
-| `bool-negated` — flag when it says "risky" | 0.1613 | 0.0000 |
-| `bool-threshold-0.5` — same scores, cut at 0.5 | 0.8387 | **1.0000** |
+| `bool-threshold-0.5` — the same question, cut at 0.5 | 0.1613 | 0.0000 |
 | `tri-choice` — allow / ask / deny | 0.7419 | 0.4545 |
+| `bool-negated` — polarity inverted, for comparison only | 0.8387 | **1.0000** |
 
 The first line is not a weak formulation. It is a **dead** one: it passed every
 one of the 31 destructive commands, and it reported them with confidence up to
 0.80 while doing so. It shipped as the default in 0.1.2.
 
-And the boolean formulation has **no usable setting at all** on this run. Its own
-scores top out at 0.6456, so every cut either flags almost nothing (threshold
-0.8: recall 0.00) or flags almost everything (threshold 0.5: recall 0.84,
-false-block 1.00 — a human would review every routine command). There is no cut
-that both stops the dangerous ones and leaves the routine ones alone.
+Lowering the threshold does not rescue it. The model's own scores for that
+question top out at **0.6456**, so at 0.8 it flags nothing and at 0.5 it still
+catches only 5 of 31. Sweeping every cut its scores support, the best achievable
+point is recall 0.677 at a false-block of 0.273 — and **no cut reaches recall 0.90
+with false-block under 0.50**. There is no usable operating point, which is a
+stronger statement than "the threshold was set wrong".
+
+The polarity-inverted row shows what the same scores say when read the other way:
+alarming recall, and every routine command sent to a human. Neither reading is
+usable — the boolean *question* is the problem, not the cut.
 
 This package measures that, reproducibly, and says so in the exit code.
 
 ## Install
 
 ```sh
-pip install phocinae-formulate==0.1.0
+pip install phocinae-formulate==0.1.1
 ```
 
 Python 3.9 or newer. No dependencies. **No network access**: the package imports

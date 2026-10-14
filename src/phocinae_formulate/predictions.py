@@ -62,6 +62,27 @@ def load_predictions(path, allow_synthetic=False):
             if not isinstance(row, dict):
                 raise FormulateError("E_PREDICTIONS", "line %d is not an object" % number)
             if row.get("record") == "header":
+                if header is not None:
+                    raise FormulateError("E_PREDICTIONS",
+                                         "line %d: a second header record" % number)
+                # The header's own claim is screened with the same rule as the
+                # rows. A file whose top-level provenance says "synthetic" must
+                # not be analysed merely because its rows say "recorded" -- the
+                # file-level claim is the more prominent one.
+                header_provenance = row.get("provenance")
+                if not isinstance(header_provenance, dict) or not header_provenance.get("kind"):
+                    raise FormulateError(
+                        "E_PREDICTIONS",
+                        "line %d: the header record needs 'provenance.kind'" % number,
+                    )
+                header_kind = header_provenance.get("kind")
+                if header_kind in SYNTHETIC_KINDS and not allow_synthetic:
+                    raise FormulateError(
+                        "E_SYNTHETIC_REFUSED",
+                        "line %d: the header declares provenance kind %r, which is refused "
+                        "for analysis (pass --allow-synthetic to override deliberately)"
+                        % (number, header_kind),
+                    )
                 header = row
                 continue
             if row.get("record") not in (None, "prediction"):
@@ -119,6 +140,27 @@ def load_predictions(path, allow_synthetic=False):
     if not predictions:
         raise FormulateError("E_EMPTY_SCAN",
                              "%r has a header but no predictions: nothing to measure" % path)
+
+    # Duplicate ids are refused, mirroring the gold loader. A duplicate is not a
+    # harmless second measurement: it weights one record twice in every metric,
+    # and the G-base gate is a ratio, so duplicating a single routine record
+    # enough times flips a failing gate to a passing one. Concatenating
+    # overlapping prediction files is the ordinary way to hit this.
+    seen = set()
+    duplicates = []
+    for prediction in predictions:
+        key = (prediction.formulation, prediction.id)
+        if key in seen:
+            duplicates.append("%s/%s" % (prediction.formulation, prediction.id))
+            continue
+        seen.add(key)
+    if duplicates:
+        raise FormulateError(
+            "E_DUPLICATE_PREDICTION",
+            "%r repeats %d (formulation, id) pair(s): %s%s"
+            % (path, len(duplicates), ", ".join(sorted(set(duplicates))[:5]),
+               " ..." if len(set(duplicates)) > 5 else ""),
+        )
     return header, predictions
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 
-from .errors import FormulateError
+from .errors import FormulateError, EXIT_EMPTY_SCAN
 
 
 class Record(object):
@@ -100,9 +100,13 @@ def load_gold(path):
                 continue
             records.append(_parse_line(line, number, seen))
     if not records:
+        # Exit 4, not the default 3: an empty gold file is a legitimate but
+        # unmeasurable dataset, not a malformed one. Leaving one reason code on
+        # two different exit codes would make the contract unguessable.
         raise FormulateError("E_EMPTY_SCAN",
                              "gold file %r has no records: a check with nothing to check "
-                             "must not report success" % path)
+                             "must not report success" % path,
+                             EXIT_EMPTY_SCAN)
     return records
 
 

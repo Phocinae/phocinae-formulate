@@ -43,7 +43,10 @@ def analyse(gold_records, predictions, formulations=None, tau_grid=None,
     if formulations:
         names = list(formulations)
     else:
-        known = [name for name in FORMULATION_ORDER if name in grouped]
+        # Seed with every built-in so an unmeasured formulation is reported as
+        # SKIP rather than dropped. "We never measured it" and "it is not one of
+        # ours" must not look the same.
+        known = list(FORMULATION_ORDER)
         extra = sorted(name for name in grouped if name not in FORMULATION_ORDER)
         names = known + extra
     if not names:
@@ -76,24 +79,70 @@ def analyse(gold_records, predictions, formulations=None, tau_grid=None,
         correctness = []
         tau_rows = []
         unknown_ids = []
+        unscoreable_confidence = 0
+        mismatches = []
+        duplicates = []
+        seen_ids = set()
         for prediction in rows:
+            if prediction.id in seen_ids:
+                duplicates.append(prediction.id)
+                continue
+            seen_ids.add(prediction.id)
             record = by_id.get(prediction.id)
             if record is None:
                 unknown_ids.append(prediction.id)
                 continue
-            positive = record.positive
+
+            # Derive the flag from the answer whenever the question shape is
+            # known, and require the recorded flag to agree. Without this the
+            # measurement rides on an unvalidated input column: a recording whose
+            # `flagged` column is inverted would score perfectly while having
+            # measured the opposite question.
             flagged = prediction.flagged
+            if formulation is not None:
+                derived = formulation.flag(prediction.answer)
+                if derived is not None:
+                    if flagged is not None and flagged != derived:
+                        mismatches.append({
+                            "id": prediction.id,
+                            "recorded": flagged,
+                            "derived": derived,
+                            "answer": prediction.answer,
+                        })
+                    flagged = derived
+
+            positive = record.positive
             pairs.append((flagged, positive))
             if prediction.has_confidence:
-                confidences.append(prediction.confidence)
-                correctness.append(None if flagged is None or positive is None
-                                   else flagged == positive)
-                tau_rows.append((prediction.confidence, flagged, positive))
+                if flagged is None or positive is None:
+                    # Scorable confidence but no scorable outcome: this row cannot
+                    # enter a confusion matrix, so it must not enter calibration
+                    # either. Feeding it in as `correct = False` reports the model
+                    # as miscalibrated because of rows the tool itself declined to
+                    # score.
+                    unscoreable_confidence += 1
+                else:
+                    confidences.append(prediction.confidence)
+                    correctness.append(flagged == positive)
+                    tau_rows.append((prediction.confidence, flagged, positive))
+
+        if mismatches:
+            raise FormulateError(
+                "E_FLAG_MISMATCH",
+                "%s: the recorded 'flagged' column disagrees with the flag derived from "
+                "'answer' for %d of %d rows (first: id=%s recorded=%r derived=%r answer=%r). "
+                "The recording is not measuring the question this formulation names."
+                % (name, len(mismatches), len(rows), mismatches[0]["id"],
+                   mismatches[0]["recorded"], mismatches[0]["derived"],
+                   mismatches[0]["answer"]),
+            )
 
         if not pairs:
             per_formulation[name] = {
                 "status": "SKIP",
                 "skip_reason": "no prediction matched a gold record",
+                "unmatched_ids": sorted(set(unknown_ids)),
+                "duplicate_ids": sorted(set(duplicates)),
             }
             continue
 
@@ -101,6 +150,17 @@ def analyse(gold_records, predictions, formulations=None, tau_grid=None,
         skipped = undecided(pairs)
         calibration = calibration_summary(confidences, correctness, bins)
         tau_result = tau_sweep(tau_rows, grid=tau_grid)
+
+        # Coverage: gold records this formulation has no prediction for. A partial
+        # predictions file yields a "clean" recall over whatever subset happened
+        # to match, which is a number about the file rather than about the model.
+        predicted_ids = {p.id for p in rows}
+        unmatched_gold = sorted(
+            record.id for record in gold_records if record.id not in predicted_ids
+        )
+        coverage = None
+        if gold_records:
+            coverage = float(len(gold_records) - len(unmatched_gold)) / len(gold_records)
 
         kwargs = {}
         if min_recall is not None:
@@ -125,6 +185,11 @@ def analyse(gold_records, predictions, formulations=None, tau_grid=None,
             "counts": matrix.as_dict(),
             "undecided_rows": skipped,
             "unmatched_ids": sorted(set(unknown_ids)),
+            "duplicate_ids": sorted(set(duplicates)),
+            "gold_records": len(gold_records),
+            "matched_records": matrix.n + skipped,
+            "unmatched_gold_ids": unmatched_gold,
+            "coverage": coverage,
             "recall": decision.recall,
             "missed_allow": _round(matrix.missed_allow),
             "model_false_block": decision.false_block,
@@ -137,6 +202,7 @@ def analyse(gold_records, predictions, formulations=None, tau_grid=None,
             "recall_display": _fmt(decision.recall),
             "model_false_block_display": _fmt(decision.false_block),
             "calibration": calibration,
+            "confidence_unscoreable": unscoreable_confidence,
             "calibration_buckets": bucket_table(confidences, correctness, bins),
             "tau": {
                 "selected": tau_result["tau"],
@@ -189,6 +255,27 @@ def dumps(payload):
                       separators=(",", ":"), allow_nan=False) + "\n"
 
 
+def _summary_line(counts):
+    """The fixed-format summary line.
+
+    Keys appear in a fixed order with a single ``skip_reasons`` counter, so a
+    downstream parser can match on it. ``ran + skipped == formulations`` always
+    holds, which is what makes "we skipped it" distinguishable from "it passed".
+    """
+    return "SUMMARY formulations=%d ran=%d skipped=%d failed=%d skip_reasons=%d%s" % (
+        counts.get("formulations", 0),
+        counts.get("ran", 0),
+        counts.get("skipped", 0),
+        counts.get("failed", 0),
+        counts.get("skip_reasons", counts.get("skipped", 0)),
+        "".join(
+            " %s=%s" % (key, counts[key])
+            for key in sorted(counts)
+            if key not in ("formulations", "ran", "skipped", "failed", "skip_reasons")
+        ),
+    )
+
+
 def render_text(report):
     """Human-readable rendering. The JSON above is the machine contract."""
     lines = []
@@ -204,16 +291,18 @@ def render_text(report):
             lines.append("%-14s SKIP  (%s)" % (name, entry.get("skip_reason")))
             continue
         counts = entry["counts"]
-        lines.append("%-14s %s   recall=%s  false-block=%s  tp=%d/fn=%d/fp=%d/tn=%d  tau=%s"
+        lines.append("%-18s %s   recall=%s  false-block=%s  tp=%d/fn=%d/fp=%d/tn=%d  tau=%s"
                      % (name, entry["decision"]["do"].upper(),
                         _fmt(entry["recall"]), _fmt(entry["model_false_block"]),
                         counts["tp"], counts["fn"], counts["fp"], counts["tn"],
                         entry["tau"]["selected"]))
+        if entry.get("coverage") not in (None, 1.0):
+            lines.append("                   coverage=%.4f (%d gold record(s) unmatched)"
+                         % (entry["coverage"], len(entry.get("unmatched_gold_ids") or [])))
         for reason in entry["decision"]["fail_reasons"]:
             lines.append("                 - %s" % reason)
     lines.append("")
-    lines.append("SUMMARY " + " ".join(
-        "%s=%s" % (k, v) for k, v in sorted((report.get("counts") or {}).items())))
+    lines.append(_summary_line(report.get("counts") or {}))
     for line in report["decision"]["headline"]:
         lines.append(line)
     lines.append("")

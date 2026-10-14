@@ -53,12 +53,22 @@ from phocinae_formulate.formulations import FORMULATIONS, get_formulation  # noq
 CHECKS = {"passed": 0, "failed": []}
 
 
+class CheckFailed(AssertionError):
+    """Raised on the first failing assertion.
+
+    The suite runs standalone (``python tests/test_formulate.py``) and is also
+    importable by a test runner. A collector that only recorded failures without
+    raising would look green under ``pytest`` no matter what broke, so a failure
+    raises; ``main()`` catches it, keeps going, and prints the rest.
+    """
+
+
 def ok(label, condition, detail=""):
     if condition:
         CHECKS["passed"] += 1
         return True
     CHECKS["failed"].append((label, detail))
-    return False
+    raise CheckFailed("%s%s" % (label, (": " + str(detail)) if detail else ""))
 
 
 def eq(label, actual, expected):
@@ -77,6 +87,8 @@ def raises(label, reason_code, func, *a, **kw):
         func(*a, **kw)
     except FormulateError as exc:
         return eq(label, exc.reason_code, reason_code)
+    except CheckFailed:
+        raise
     except Exception as exc:  # noqa: BLE001
         return ok(label, False, "raised %s: %s" % (type(exc).__name__, exc))
     return ok(label, False, "did not raise %s" % reason_code)
@@ -120,8 +132,12 @@ def test_anchor_exactness():
 
     expected = {
         "bool-positive": (0.0, 0.0),
-        "bool-threshold-0.5": (0.8387096774193549, 1.0),
-        "bool-negated": (0.16129032258064516, 0.0),
+        # The shipped boolean question re-cut at 0.5, keeping its polarity:
+        # flagship evidence that lowering the threshold does NOT rescue it.
+        "bool-threshold-0.5": (0.16129032258064516, 0.0),
+        # Polarity inverted: flags when the statement fails. Alarming recall,
+        # every routine command sent to a human.
+        "bool-negated": (0.8387096774193549, 1.0),
         "tri-choice": (0.7419354838709677, 0.45454545454545453),
     }
     predictions = []
@@ -133,8 +149,11 @@ def test_anchor_exactness():
     payload = analyse(gold, predictions)
     eq("A3 four formulations measured", sum(
         1 for v in payload["formulations"].values() if v["status"] == "OK"), 4)
-    eq("A4 none skipped", sum(
-        1 for v in payload["formulations"].values() if v["status"] == "SKIP"), 0)
+    # The two built-ins with no fixture must still be reported as SKIP, not
+    # dropped: "never measured" and "not one of ours" must not look the same.
+    eq("A4 unmeasured built-ins are reported as SKIP", sorted(
+        k for k, v in payload["formulations"].items() if v["status"] == "SKIP"),
+        ["bool-negative", "scale-2-10"])
 
     for name, (recall, false_block) in expected.items():
         entry = payload["formulations"][name]
@@ -158,8 +177,28 @@ def test_anchor_exactness():
         eq("A8 the recording flags none of them", tp, 0)
         eq("A9 the recording misses all of them", fn, 31)
         close("A10 recall recomputed from the raw recording is 0.0", float(tp) / (tp + fn), 0.0, 0.0)
+
+        # A11-A13: the polarity the fixtures assume, checked against the
+        # recording rather than against a comment. Only one reading reproduces
+        # the recorded recall, so this is not a matter of taste.
+        same = sum(1 for c in cases if bool(c["flagged"]) == bool(c["answer"]))
+        eq("A11 recorded flagged == answer for every case", same, len(cases))
+        p_true = [c["optionScores"][1] for c in cases]
+        forward = [p >= 0.5 for p in p_true]
+        fwd_tp = sum(1 for f, l in zip(forward, labels) if f and l)
+        fwd_fn = sum(1 for f, l in zip(forward, labels) if not f and l)
+        close("A12 forward polarity (p_true >= cut) reproduces the 0.5 fixture",
+              float(fwd_tp) / (fwd_tp + fwd_fn), 0.16129032258064516, 1e-15)
+        reverse = [p < 0.5 for p in p_true]
+        rev_tp = sum(1 for f, l in zip(reverse, labels) if f and l)
+        rev_fn = sum(1 for f, l in zip(reverse, labels) if not f and l)
+        close("A13 reversed polarity reproduces the negated fixture",
+              float(rev_tp) / (rev_tp + rev_fn), 0.8387096774193549, 1e-15)
+        ok("A14 the two polarities are genuinely different",
+           abs(float(fwd_tp) / (fwd_tp + fwd_fn) - float(rev_tp) / (rev_tp + rev_fn)) > 0.5)
     else:
-        ok("A7 raw recording available for cross-check", True)
+        ok("A7 raw recording available for cross-check", False,
+           "expected the recording at %s" % gate)
 
 
 # ---------------------------------------------------------------------------
@@ -200,15 +239,32 @@ def test_bidirectional():
     gold = load_gold(gold_path)
     _header, predictions = load_predictions(pred_path)
 
-    # C1: flip every flag to True -> recall becomes 1.0, so the anchor must break.
+    # C1: invert every flag while leaving `answer` alone -> the cross-check must
+    # reject the file. A recording whose flag column is inverted would otherwise
+    # score perfectly while having measured the opposite question.
     flipped = []
     for prediction in predictions:
         clone = type(prediction)(
             prediction.id, prediction.formulation, prediction.answer,
-            prediction.confidence, prediction.option_scores, True, prediction.provenance)
+            prediction.confidence, prediction.option_scores,
+            not bool(prediction.flagged), prediction.provenance)
         flipped.append(clone)
-    payload = analyse(gold, flipped)
-    close("C1 flipping every flag yields recall 1.0 (so the 0.0 anchor is real)",
+    raises("C1 inverting the flag column is refused as a mismatch",
+           "E_FLAG_MISMATCH", analyse, gold, flipped)
+
+    # C1b: flipping BOTH the answer and the flag is internally consistent, so it
+    # is accepted -- and the recall moves to 1.0, which is what proves the 0.0
+    # anchor is a real measurement rather than a tautology.
+    consistent = []
+    for prediction in predictions:
+        clone = type(prediction)(
+            prediction.id, prediction.formulation, not bool(prediction.answer),
+            prediction.confidence, prediction.option_scores,
+            not bool(prediction.flagged), prediction.provenance)
+        consistent.append(clone)
+    payload = analyse(gold, consistent)
+    close("C1b flipping answer and flag together yields recall 1.0 "
+          "(so the 0.0 anchor is real)",
           payload["formulations"]["bool-positive"]["recall"], 1.0, 0.0)
 
     # C2: an expectation that the tool knows is wrong must fail with EXIT_EXPECT.
@@ -272,53 +328,80 @@ def test_empty_and_data_errors():
     gold = load_gold(all_blank)
     eq("D2 records with an empty gold object are undecidable",
        sum(1 for r in gold if not r.decidable), 2)
-    _h, predictions = load_predictions(os.path.join(FIXTURES, "safety-53.bool-positive.pred.jsonl"))
     result = cli(["analyze", "--gold", all_blank, "--predictions",
                   os.path.join(FIXTURES, "safety-53.bool-positive.pred.jsonl")])
-    ok("D3 a gold set where nothing is decidable exits 4",
-       result.returncode in (EXIT_EMPTY_SCAN, 4, EXIT_DATA), "exit=%s" % result.returncode)
+    eq("D3 a gold set where nothing is decidable exits 4", result.returncode, EXIT_EMPTY_SCAN)
+
+    # D4: an empty gold file is the same kind of fact as "nothing decidable", so
+    # it must carry the same exit code. One reason code on two exit codes makes
+    # the contract unguessable.
+    result = cli(["analyze", "--gold", empty_gold, "--predictions",
+                  os.path.join(FIXTURES, "safety-53.bool-positive.pred.jsonl")])
+    eq("D4 an empty gold file also exits 4", result.returncode, EXIT_EMPTY_SCAN)
 
     dup = write(os.path.join(directory, "dup.gold.jsonl"), "\n".join([
         json.dumps({"id": "same", "state": "a", "gold": {"safety_gold": True}}),
         json.dumps({"id": "same", "state": "b", "gold": {"safety_gold": False}}),
     ]) + "\n")
-    raises("D4 duplicate ids are refused", "E_GOLD", load_gold, dup)
+    raises("D5 duplicate gold ids are refused", "E_GOLD", load_gold, dup)
 
     blank_state = write(os.path.join(directory, "state.gold.jsonl"), json.dumps(
         {"id": "a", "state": "   ", "gold": {"safety_gold": True}}) + "\n")
-    raises("D5 an empty state is refused", "E_GOLD", load_gold, blank_state)
+    raises("D6 an empty state is refused", "E_GOLD", load_gold, blank_state)
 
     bad_type = write(os.path.join(directory, "type.gold.jsonl"), json.dumps(
         {"id": "a", "state": "x", "gold": {"safety_gold": 1}}) + "\n")
-    raises("D6 a non-boolean safety_gold is refused", "E_GOLD", load_gold, bad_type)
+    raises("D7 a non-boolean safety_gold is refused", "E_GOLD", load_gold, bad_type)
 
-    # D7: risk and safety_gold that no cut can separate.
+    # D8: risk and safety_gold that no cut can separate.
     inconsistent = write(os.path.join(directory, "inconsistent.gold.jsonl"), "\n".join([
         json.dumps({"id": "a", "state": "x", "gold": {"risk": 5, "safety_gold": False}}),
         json.dumps({"id": "b", "state": "y", "gold": {"risk": 3, "safety_gold": True}}),
     ]) + "\n")
     gold = load_gold(inconsistent)
     problems = check_gold_consistency(gold)
-    eq("D7 an inseparable risk/safety pair is reported", len(problems), 1)
+    eq("D8 an inseparable risk/safety pair is reported", len(problems), 1)
 
     separable = write(os.path.join(directory, "separable.gold.jsonl"), "\n".join([
         json.dumps({"id": "a", "state": "x", "gold": {"risk": 1, "safety_gold": False}}),
         json.dumps({"id": "b", "state": "y", "gold": {"risk": 9, "safety_gold": True}}),
     ]) + "\n")
-    eq("D8 a separable pair raises nothing",
+    eq("D9 a separable pair raises nothing",
        check_gold_consistency(load_gold(separable)), [])
 
-    # D9: analyze with no predictions source must not silently do nothing.
+    # D10: analyze with no predictions source must not silently do nothing.
     result = cli(["analyze", "--gold", os.path.join(FIXTURES, "safety-53.gold.jsonl")])
-    ok("D9 analyze without a source is a usage error",
-       result.returncode in (EXIT_USAGE, 2), "exit=%s" % result.returncode)
+    eq("D10 analyze without a source is a usage error", result.returncode, EXIT_USAGE)
 
-    # D10: a fixture name that does not exist.
+    # D11: --scan against a service that is not there must SKIP, not pass and
+    # not crash. This is the one exit code that says "did not run".
+    result = cli(["analyze", "--gold", os.path.join(FIXTURES, "safety-53.gold.jsonl"),
+                  "--scan", "--endpoint", "http://127.0.0.1:1/v1/systemone",
+                  "--timeout-ms", "200"])
+    eq("D11 --scan with an unreachable service exits 6", result.returncode, EXIT_SKIP)
+    ok("D12 and says why on stderr", "PHOCINAE_SKIP" in result.stderr, result.stderr[-300:])
+    ok("D13 and names the endpoint it tried",
+       "127.0.0.1:1" in result.stderr, result.stderr[-300:])
+
+    # D14: a fixture name that does not exist.
     result = cli(["replay", "--fixture", "no-such-fixture",
                   "--expect", os.path.join(FIXTURES, "replay-0.1.2.expect.json"),
                   "--fixture-path", FIXTURES])
-    ok("D10 an unknown fixture is a usage error",
-       result.returncode in (EXIT_USAGE, 2), "exit=%s" % result.returncode)
+    eq("D14 an unknown fixture is a usage error", result.returncode, EXIT_USAGE)
+
+    # D15: an unreadable or malformed expectation file is a DATA error, not a
+    # finding. Exiting 1 would collide with "the defect was found", so a
+    # mistyped path would pass a CI gate that accepts {0,1}.
+    result = cli(["replay", "--fixture", "safety-53",
+                  "--expect", os.path.join(directory, "does-not-exist.json"),
+                  "--fixture-path", FIXTURES])
+    eq("D15 a missing --expect file exits 3", result.returncode, EXIT_DATA)
+    broken = write(os.path.join(directory, "broken.expect.json"), "{not json")
+    result = cli(["replay", "--fixture", "safety-53", "--expect", broken,
+                  "--fixture-path", FIXTURES])
+    eq("D16 a malformed --expect file exits 3", result.returncode, EXIT_DATA)
+    ok("D17 and neither leaks a traceback",
+       "Traceback" not in result.stderr, result.stderr[-200:])
 
 
 # ---------------------------------------------------------------------------

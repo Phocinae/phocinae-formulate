@@ -19,6 +19,8 @@ import sys
 import zipfile
 
 REQUIRED = [
+    "phocinae_formulate/fixtures/safety-53.gold.jsonl",
+    "phocinae_formulate/fixtures/replay-0.1.2.expect.json",
     "phocinae_formulate/__init__.py",
     "phocinae_formulate/__main__.py",
     "phocinae_formulate/calibration.py",
@@ -33,10 +35,12 @@ REQUIRED = [
     "phocinae_formulate/verdict.py",
 ]
 
-FORBIDDEN_SUBSTRINGS = ("__pycache__", "/tests/", "\\tests\\", "/fixtures/", "\\fixtures\\")
+# fixtures/ is deliberately packaged (the quick-start replay must work for a pip
+# user), so it is NOT forbidden; tests/ still is.
+FORBIDDEN_SUBSTRINGS = ("__pycache__", "/tests/", "\\tests\\")
 FORBIDDEN_SUFFIXES = (".pyc", ".pyo")
 
-EXPECTED_VERSION = "0.1.0"
+EXPECTED_VERSION = "0.1.1"
 
 
 def wheels_in(target):

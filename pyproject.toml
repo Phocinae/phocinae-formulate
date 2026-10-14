@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phocinae-formulate"
-version = "0.1.0"
+version = "0.1.1"
 description = "Measure which way of asking a decision model actually works: run four formulations over one labelled set and report recall, calibration and a usable escalation threshold."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -40,4 +40,8 @@ package-dir = { "" = "src" }
 packages = ["phocinae_formulate"]
 
 [tool.setuptools.package-data]
-phocinae_formulate = ["py.typed"]
+# The recorded fixtures ship **inside the package**. Without this the README's
+# quick-start commands fail for anyone who installed from PyPI: the flagship
+# replay is the whole point of the tool, and a user who cannot run it has to take
+# the numbers on faith.
+phocinae_formulate = ["py.typed", "fixtures/*.jsonl", "fixtures/*.json"]

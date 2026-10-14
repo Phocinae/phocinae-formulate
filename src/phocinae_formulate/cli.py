@@ -35,7 +35,27 @@ from .predictions import load_predictions
 from .report import analyse, build_report, dumps, render_text
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_FIXTURES = os.path.join(os.path.dirname(os.path.dirname(HERE)), "fixtures")
+
+
+def _fixture_dir():
+    """Where the shipped fixtures live.
+
+    Two layouts have to work: a repository checkout (``<repo>/fixtures``) and an
+    installed wheel (``<package>/fixtures``). The installed layout is the one
+    that matters for a user who ran ``pip install``; the checkout layout is what
+    the test suite uses.
+    """
+    candidates = [
+        os.path.join(os.path.dirname(os.path.dirname(HERE)), "fixtures"),
+        os.path.join(HERE, "fixtures"),
+    ]
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return candidate
+    return candidates[0]
+
+
+DEFAULT_FIXTURES = _fixture_dir()
 
 
 def _emit(text):
@@ -149,6 +169,72 @@ def _fmt(value):
 # ---------------------------------------------------------------------------
 
 
+def _counts_from(payload, gold, predictions, failed=0):
+    statuses = [v.get("status") for v in payload["formulations"].values()]
+    ran = sum(1 for s in statuses if s == "OK")
+    skipped = sum(1 for s in statuses if s == "SKIP")
+    decidable = [r for r in gold if r.decidable]
+    return {
+        "formulations": len(payload["formulations"]),
+        "ran": ran,
+        "skipped": skipped,
+        "failed": failed,
+        "skip_reasons": skipped,
+        "gold_records": len(gold),
+        "decidable_records": len(decidable),
+        "undecidable_records": len(gold) - len(decidable),
+        "predictions": len(predictions),
+    }
+
+
+def _probe_service(endpoint, timeout_ms):
+    """Is the decision service up? Returns ``(up, detail)``.
+
+    Only a positive answer counts: anything else -- connection refused, a
+    timeout, a 500, a body without ``model_loaded: true`` -- is "not usable", and
+    the caller must not make a measurement request.
+
+    The probe runs in a **child interpreter**, not in this process. Testing the
+    reachability of a service and analysing recorded numbers are different jobs,
+    and this package promises that importing it pulls in no network machinery at
+    all -- a promise a test enforces. Keeping the socket out of this process is
+    also what makes the probe bounded: a hung DNS lookup cannot outlive the
+    child.
+    """
+    base = endpoint.rstrip("/")
+    if base.endswith("/v1/systemone"):
+        base = base[: -len("/v1/systemone")]
+    url = base + "/health"
+    timeout = max(0.05, float(timeout_ms) / 1000.0)
+    child = (
+        "import json,sys,urllib.request\n"
+        "try:\n"
+        "    with urllib.request.urlopen(sys.argv[1], timeout=float(sys.argv[2])) as r:\n"
+        "        body = r.read().decode('utf-8','replace')\n"
+        "    print(body)\n"
+        "except Exception as exc:\n"
+        "    print('PROBE_FAILED ' + type(exc).__name__ + ': ' + str(exc))\n"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", child, url, str(timeout)],
+            capture_output=True, text=True, encoding="utf-8",
+            timeout=timeout + 10.0,
+        )
+    except Exception as exc:  # noqa: BLE001 - any failure means "not usable"
+        return False, "%s: %s" % (type(exc).__name__, exc)
+    out = (proc.stdout or "").strip()
+    if out.startswith("PROBE_FAILED"):
+        return False, out[len("PROBE_FAILED "):].strip()
+    try:
+        payload = json.loads(out)
+    except ValueError:
+        return False, "%s answered with a body that is not JSON" % url
+    if not isinstance(payload, dict) or payload.get("model_loaded") is not True:
+        return False, "%s answered without model_loaded=true" % url
+    return True, url
+
+
 def _cmd_analyze(args):
     gold = load_gold(args.gold)
     inconsistencies = check_gold_consistency(gold)
@@ -163,12 +249,24 @@ def _cmd_analyze(args):
                          % len(gold))
         return EXIT_EMPTY_SCAN
 
+    # --scan: check the service before measuring, and skip cleanly if it is not
+    # there. A scan that cannot run must exit 6, not 0 and not a crash: "did not
+    # run" is not "passed".
+    if args.scan:
+        up, detail = _probe_service(args.endpoint, args.timeout_ms)
+        if not up:
+            sys.stderr.write(
+                "PHOCINAE_SKIP: the decision service is not reachable, so no formulation "
+                "was measured\n  endpoint: %s\n  reason: %s\n"
+                "  the analysis path (--predictions) works without a service\n"
+                % (args.endpoint, detail))
+            return EXIT_SKIP
+
     if not args.predictions:
         sys.stderr.write(
-            "ERROR E_NO_SOURCE: analyze needs --predictions. This tool measures\n"
-            "      formulations from recorded answers; the live path (--scan) is not\n"
-            "      implemented in 0.1.0 by design, because a scan that cannot run in CI\n"
-            "      would be a check that never executes.\n")
+            "ERROR E_NO_SOURCE: analyze needs --predictions or --scan.\n"
+            "      --predictions measures recorded answers and works anywhere;\n"
+            "      --scan measures against a live service and skips (exit 6) if it is down.\n")
         return EXIT_USAGE
 
     header, predictions = load_predictions(args.predictions,
@@ -179,20 +277,8 @@ def _cmd_analyze(args):
         bins=args.ece_bins,
     )
 
-    reachable = sum(1 for v in payload["formulations"].values() if v.get("status") == "OK")
-    statuses = [v.get("status") for v in payload["formulations"].values()]
-    skipped = sum(1 for s in statuses if s == "SKIP")
-    counts = {
-        "formulations": len(payload["formulations"]),
-        "ran": reachable,
-        "skipped": skipped,
-        "failed": 0,
-        "gold_records": len(gold),
-        "decidable_records": len(decidable),
-        "undecidable_records": len(gold) - len(decidable),
-        "predictions": len(predictions),
-    }
-    if reachable == 0:
+    counts = _counts_from(payload, gold, predictions)
+    if counts["ran"] == 0:
         sys.stderr.write("ERROR E_EMPTY_SCAN: no formulation could be measured\n")
         return EXIT_EMPTY_SCAN
 
@@ -204,6 +290,7 @@ def _cmd_analyze(args):
         service_state={"state": "not_contacted",
                        "detail": "analysis ran from recorded predictions"},
     )
+    report["provenance_header"] = header.get("provenance")
 
     written = _write_reports(args, report)
     if args.json or written:
@@ -211,9 +298,7 @@ def _cmd_analyze(args):
     else:
         _emit(render_text(report))
 
-    if payload["decision"]["any_dont_ship"]:
-        return EXIT_FINDING
-    return EXIT_OK
+    return resolve_exit_code([EXIT_FINDING if payload["decision"]["any_dont_ship"] else EXIT_OK])
 
 
 # ---------------------------------------------------------------------------
@@ -327,14 +412,7 @@ def _cmd_replay(args):
         sources.append(path)
 
     payload = analyse(gold, predictions, tau_grid=_load_tau_grid(args), bins=args.ece_bins)
-    counts = {
-        "formulations": len(payload["formulations"]),
-        "ran": sum(1 for v in payload["formulations"].values() if v.get("status") == "OK"),
-        "skipped": sum(1 for v in payload["formulations"].values() if v.get("status") == "SKIP"),
-        "failed": 0,
-        "gold_records": len(gold),
-        "predictions": len(predictions),
-    }
+    counts = _counts_from(payload, gold, predictions)
     report = build_report(
         payload,
         gold_path=os.path.abspath(gold_path),
@@ -349,8 +427,23 @@ def _cmd_replay(args):
             "      expectation reproduces numbers without checking them.\n")
         return EXIT_USAGE
 
-    with open(args.expect, "r", encoding="utf-8") as handle:
-        expectation = json.load(handle)
+    # An unreadable or malformed expectation file is a *data* error, not a
+    # finding. Letting it surface as a traceback would exit 1, which is the same
+    # code as "the 0.1.2 defect was found" -- so a mistyped path would silently
+    # pass a CI gate that accepts {0,1}.
+    try:
+        with open(args.expect, "r", encoding="utf-8") as handle:
+            expectation = json.load(handle)
+    except OSError as exc:
+        raise FormulateError("E_EXPECT_UNREADABLE",
+                             "cannot read --expect %r: %s" % (args.expect, exc), EXIT_DATA)
+    except ValueError as exc:
+        raise FormulateError("E_EXPECT_INVALID",
+                             "--expect %r is not valid JSON: %s" % (args.expect, exc), EXIT_DATA)
+    if not isinstance(expectation, dict):
+        raise FormulateError("E_EXPECT_INVALID",
+                             "--expect %r must contain a JSON object" % args.expect, EXIT_DATA)
+
     failures = _resolve_expectation(expectation, report)
     report["expectations"] = {
         "file": os.path.abspath(args.expect),
@@ -367,9 +460,7 @@ def _cmd_replay(args):
         for failure in failures:
             sys.stderr.write("EXPECTATION FAILED %s\n" % failure)
         return EXIT_EXPECT
-    if payload["decision"]["any_dont_ship"]:
-        return EXIT_FINDING
-    return EXIT_OK
+    return resolve_exit_code([EXIT_FINDING if payload["decision"]["any_dont_ship"] else EXIT_OK])
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +519,14 @@ def build_parser():
 
     analyze = sub.add_parser("analyze", help="analyse recorded predictions against a gold set")
     analyze.add_argument("--gold", required=True)
-    analyze.add_argument("--predictions", required=True)
+    analyze.add_argument("--predictions", help="recorded answers; works with no service running")
+    analyze.add_argument("--scan", action="store_true",
+                         help="measure against a live decision service; skips with exit 6 if it "
+                              "is not reachable")
+    analyze.add_argument("--endpoint", default=os.environ.get(
+        "PHOCINAE_ENDPOINT", "http://127.0.0.1:8155/v1/systemone"))
+    analyze.add_argument("--model", default="Phocinae-Largha-150M-v1")
+    analyze.add_argument("--timeout-ms", type=int, default=3000)
     analyze.add_argument("--allow-synthetic", action="store_true",
                          help="permit synthetic provenance (tests only)")
     common(analyze)
