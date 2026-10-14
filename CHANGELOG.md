@@ -35,6 +35,47 @@ CI now reports `PASS=124 FAIL=0 SKIP=8` where it previously reported
 `PASS=124 FAIL=2` **and exited 0**. Locally, with the recording present, it reports
 `PASS=132 FAIL=0 SKIP=0` — so the eight assertions still run where they can.
 
+### Fixed — three more ways the CI step could fail without saying why
+
+Getting the replay step green took four attempts, and each failure was a check that
+could not distinguish "the code is wrong" from "the check is wrong". All three are
+recorded, because the shape recurs.
+
+**`grep -q` as an assertion.** `grep -q` exits 1 when it finds nothing, and a
+`run:` block executes under `set -e`, so a check that reports a problem and a check
+that is broken produce an identical red step. The step printed
+`replay exit code: 1 (1 = a finding was reported)` — the replay having done exactly
+the right thing — and then died on the next line without saying what it had looked
+for. The JSON is now asserted in Python by `tools/check_replay_json.py`, which
+names what it looked for and exits 1 with a specific message. Verified in both
+directions: it passes the real output and reports all five planted defects by name
+on a tampered copy.
+
+**No `PYTHONPATH`.** The step ran `python -m phocinae_formulate` in a job where the
+package is not installed — this project uses a src layout. Python exits **1** for
+"No module named phocinae_formulate", and the step's own guard (`if [ "$code" != "1" ]`)
+reads 1 as "a finding was reported". So an import failure was accepted as a
+successful reproduction of the defect this project exists to detect.
+`PYTHONPATH: src` is now set, and each step asserts the import first, so a missing
+module cannot masquerade as the finding again.
+
+The unit tests never showed this, because the test script sets `PYTHONPATH` for
+itself. That left the CLI steps as the only path CI exercised without it, which is
+the path that was broken.
+
+**`_emit` did not flush.** Into a pipe — what CI does, and what `--json > file`
+does — CPython block-buffers stdout instead of line-buffering, and the report can
+be lost at exit. The consumer then sees an empty file and reports "not valid JSON:
+Expecting value: line 1 column 1", which points at the reader rather than at the
+missing output.
+
+`check_replay_json.py` reads bytes rather than opening in text mode, and decides
+the encoding from the BOM. The producer of that file is a *shell redirection* and
+shells disagree: bash writes UTF-8 with no BOM, PowerShell's `>` writes UTF-16LE
+with one, and a BOM in front of otherwise valid UTF-8 JSON makes `json.load` raise.
+A check that understands only one of those reports the author's shell instead of
+the replay's state — which is exactly the detour this took.
+
 ### Added — a release workflow
 
 `.github/workflows/release.yml` did not exist for this project, so its PyPI
